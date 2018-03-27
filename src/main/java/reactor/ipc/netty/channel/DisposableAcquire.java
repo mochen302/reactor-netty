@@ -114,18 +114,18 @@ final class DisposableAcquire implements Connection, ConnectionEvents,
 
 	@Override
 	public Mono<Void> onDispose() {
+		log.debug("{} onDispose", channel);
 		Acquisition current = this.currentOwner;
 		return Mono.first(Mono.fromDirect(current.onReleaseEmitter),
-				FutureMono.from(channel.closeFuture()));
+		                  FutureMono.from(channel.closeFuture()));
 	}
 
 	@Override
 	public void onReceiveError(Channel channel, Throwable error) {
-		log.error("onReceiveError({})", channel);
+		log.error("{} onReceiveError {}", channel, error);
 		if (DISPOSED == currentOwner) {
 			if (log.isDebugEnabled()) {
-				log.debug("Dropping error {} because of {}", channel,
-						"asynchronous user cancellation");
+				log.debug("{} Dropping because of an asynchronous user cancellation", channel);
 			}
 			return;
 		}
@@ -134,7 +134,7 @@ final class DisposableAcquire implements Connection, ConnectionEvents,
 
 	@Override
 	public void onSetup(Channel channel, @Nullable Object msg) {
-		log.debug("onConnectionSetup({})", channel);
+		log.debug("{} onSetup", channel);
 		ChannelOperations<?, ?> ops = opsFactory.create(this, this, msg);
 
 		channel.attr(OPERATIONS_KEY)

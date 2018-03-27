@@ -46,11 +46,10 @@ import reactor.util.Loggers;
  * <pre>
  * {@code
  * HttpServer.create()
- * .host("0.0.0.0")
- * .tcpConfiguration(TcpServer::secure)
- * .handler((req, res) -> res.sendString(Flux.just("hello"))
- * .bind()
- * .block();
+ *           .tcpConfiguration(TcpServer::secure)
+ *           .handler((req, res) -> res.sendString(Flux.just("hello"))
+ *           .bind()
+ *           .block();
  * }
  *
  * @author Stephane Maldini
@@ -76,14 +75,14 @@ public abstract class HttpServer {
 	}
 
 	/**
-	 * Bind the {@link HttpServer} and return a {@link Mono} of {@link Connection}. If
+	 * Bind the {@link HttpServer} and return a {@link Mono} of {@link DisposableServer}. If
 	 * {@link Mono} is cancelled, the underlying binding will be aborted. Once the {@link
-	 * Connection} has been emitted and is not necessary anymore, disposing main server
-	 * loop must be done by the user via {@link Connection#dispose()}.
+	 * DisposableServer} has been emitted and is not necessary anymore, disposing main server
+	 * loop must be done by the user via {@link DisposableServer#dispose()}.
 	 *
 	 * If updateConfiguration phase fails, a {@link Mono#error(Throwable)} will be returned;
 	 *
-	 * @return a {@link Mono} of {@link Connection}
+	 * @return a {@link Mono} of {@link DisposableServer}
 	 */
 	public final Mono<? extends DisposableServer> bind() {
 		return bind(tcpConfiguration());
@@ -91,10 +90,10 @@ public abstract class HttpServer {
 
 	/**
 	 * Start a Server in a blocking fashion, and wait for it to finish initializing. The
-	 * returned {@link Connection} offers simple server API, including to {@link
-	 * Connection#disposeNow()} shut it down in a blocking fashion.
+	 * returned {@link DisposableServer} offers simple server API, including to {@link
+	 * DisposableServer#disposeNow()} shut it down in a blocking fashion.
 	 *
-	 * @return a {@link Connection}
+	 * @return a {@link DisposableServer}
 	 */
 	public final DisposableServer bindNow() {
 		return bindNow(Duration.ofSeconds(45));
@@ -103,12 +102,12 @@ public abstract class HttpServer {
 
 	/**
 	 * Start a Server in a blocking fashion, and wait for it to finish initializing. The
-	 * returned {@link Connection} offers simple server API, including to {@link
-	 * Connection#disposeNow()} shut it down in a blocking fashion.
+	 * returned {@link DisposableServer} offers simple server API, including to {@link
+	 * DisposableServer#disposeNow()} shut it down in a blocking fashion.
 	 *
 	 * @param timeout max startup timeout
 	 *
-	 * @return a {@link Connection}
+	 * @return a {@link DisposableServer}
 	 */
 	public final DisposableServer bindNow(Duration timeout) {
 		Objects.requireNonNull(timeout, "timeout");
@@ -164,7 +163,7 @@ public abstract class HttpServer {
 	 */
 	public final HttpServer wiretap() {
 		return tcpConfiguration(tcpServer ->
-		        tcpServer.bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER)));
+		       tcpServer.bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER)));
 	}
 
 	/**
@@ -285,11 +284,11 @@ public abstract class HttpServer {
 	}
 
 	/**
-	 * Bind the {@link HttpServer} and return a {@link Mono} of {@link Connection}
+	 * Bind the {@link HttpServer} and return a {@link Mono} of {@link DisposableServer}
 	 *
 	 * @param b the {@link TcpServer} to bind
 	 *
-	 * @return a {@link Mono} of {@link Connection}
+	 * @return a {@link Mono} of {@link DisposableServer}
 	 */
 	protected abstract Mono<? extends DisposableServer> bind(TcpServer b);
 

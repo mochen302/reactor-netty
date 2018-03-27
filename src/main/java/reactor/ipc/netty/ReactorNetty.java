@@ -399,17 +399,17 @@ final class ReactorNetty {
 	static final ConnectionEvents NOOP_LISTENER = new ConnectionEvents() {
 		@Override
 		public void onDispose(Channel channel) {
-
+			// no-op
 		}
 
 		@Override
 		public void onReceiveError(Channel channel, Throwable error) {
-
+			// no-op
 		}
 
 		@Override
 		public void onSetup(Channel channel, @Nullable Object msg) {
-
+			// no-op
 		}
 	};
 

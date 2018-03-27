@@ -18,7 +18,6 @@ package reactor.ipc.netty.channel;
 
 import java.io.IOException;
 import java.util.Objects;
-import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import javax.annotation.Nullable;
 
@@ -111,7 +110,7 @@ final class DisposableBind
 
 	@Override
 	public void onDispose(Channel channel) {
-		log.debug("onConnectionDispose({})", channel);
+		log.debug("{} onDispose", channel);
 		if (!channel.isActive()) {
 			return;
 		}
@@ -122,14 +121,14 @@ final class DisposableBind
 
 	@Override
 	public void onReceiveError(Channel channel, Throwable error) {
-		log.error("onConnectionReceiveError({})", channel);
+		log.error("{} onReceiveError {}", channel, error);
 		onDispose(channel);
 	}
 
 	@Override
 	public void onSetup(Channel channel, @Nullable Object msg) {
 		if (opsFactory.createOnConnected() || msg != null) {
-			log.debug("onConnectionSetup({})", channel);
+			log.debug("{} onSetup", channel);
 
 			ChannelOperations<?, ?> ops = opsFactory.create(() -> channel, this, msg);
 

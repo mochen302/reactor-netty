@@ -25,7 +25,6 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.ssl.JdkSslContext;
 import io.netty.util.AttributeKey;
-import reactor.core.Exceptions;
 import reactor.core.publisher.Mono;
 import reactor.ipc.netty.DisposableServer;
 import reactor.ipc.netty.NettyPipeline;

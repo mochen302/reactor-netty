@@ -27,7 +27,7 @@ import reactor.util.context.Context;
  * A normal event cycle is as follow :
  * <ol>
  *     <li>onSetup</li>
- *     <li>onReceiveError?</li>
+ *     <li>onReceiveError</li>
  *     <li>onDispose</li>
  * </ol>
  *
