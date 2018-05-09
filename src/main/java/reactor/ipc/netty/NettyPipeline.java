@@ -62,6 +62,7 @@ public interface NettyPipeline {
 	String HttpCompressor     = LEFT + "compressor";
 	String HttpAggregator     = LEFT + "httpAggregator";
 	String HttpServerHandler  = LEFT + "httpServerHandler";
+	String Http2ServerHandler = LEFT + "http2ServerHandler";
 	String HttpInitializer    = LEFT + "httpInitializer";
 	String OnChannelWriteIdle = LEFT + "onChannelWriteIdle";
 	String OnChannelReadIdle  = LEFT + "onChannelReadIdle";

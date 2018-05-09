@@ -20,6 +20,7 @@ import java.nio.charset.Charset;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
@@ -43,6 +44,7 @@ import io.netty.channel.EventLoop;
 import io.netty.channel.FileRegion;
 import io.netty.handler.codec.DecoderResult;
 import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http2.Http2Headers;
 import io.netty.util.ReferenceCountUtil;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscription;
@@ -52,6 +54,7 @@ import reactor.core.publisher.Operators;
 import reactor.ipc.netty.ConnectionEvents;
 import reactor.ipc.netty.NettyOutbound;
 import reactor.ipc.netty.NettyPipeline;
+import reactor.ipc.netty.http2.server.Http2ServerHandler;
 import reactor.util.Logger;
 import reactor.util.Loggers;
 import reactor.util.concurrent.Queues;
@@ -61,13 +64,14 @@ import reactor.util.concurrent.Queues;
  * via an IPC {@link NettyOutbound}
  *
  * @author Stephane Maldini
+ * @author Violeta Georgieva
  */
 final class ChannelOperationsHandler extends ChannelDuplexHandler
-		implements NettyPipeline.SendOptions, ChannelFutureListener {
+		implements NettyPipeline.SendOptions {
 
-	final PublisherSender                inner;
-	final int                            prefetch;
-	final ConnectionEvents listener;
+	final ConcurrentHashMap<Integer, PublisherSender> innerPublishers = new ConcurrentHashMap<>();
+	final int                                         prefetch;
+	final ConnectionEvents                            listener;
 
 	/**
 	 * Cast the supplied queue (SpscLinkedArrayQueue) to use its atomic dual-insert
@@ -83,14 +87,12 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 
 	private Unsafe                      unsafe;
 
-	volatile boolean innerActive;
 	volatile boolean removed;
 	volatile int     wip;
 	volatile long    scheduledFlush;
 
 	@SuppressWarnings("unchecked")
 	ChannelOperationsHandler(ConnectionEvents listener) {
-		this.inner = new PublisherSender(this);
 		this.prefetch = 32;
 		this.listener = listener;
 	}
@@ -185,7 +187,6 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
 		this.ctx = ctx;
 		this.unsafe = ctx.channel().unsafe();
-		inner.request(prefetch);
 	}
 
 	@Override
@@ -193,7 +194,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		if (!removed) {
 			removed = true;
 
-			inner.cancel();
+			innerPublishers.forEach((streamId, inner) -> inner.cancel());
 			drain();
 		}
 	}
@@ -255,14 +256,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		return this;
 	}
 
-	@Override
-	public void operationComplete(ChannelFuture future) throws Exception {
-		if (future.isSuccess() && innerActive) {
-			inner.request(1L);
-		}
-	}
-
-	ChannelFuture doWrite(Object msg, ChannelPromise promise, @Nullable PublisherSender inner) {
+	ChannelFuture doWrite(Object msg, ChannelPromise promise, @Nullable PublisherSender inner, int streamId, boolean endOfStream) {
 		if (flushOnEach || //fastpath
 				inner == null && pendingWrites.isEmpty() || //last drained element
 				!ctx.channel()
@@ -270,12 +264,29 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 				) {
 			pendingBytes = 0L;
 
-			ChannelFuture future = ctx.write(msg, promise);
-			if (flushOnEachWithEventLoop && ctx.channel().isWritable()) {
-				scheduleFlush();
+			ChannelFuture future;
+			if (streamId == -1) {
+				future = ctx.write(msg, promise);
+				if (flushOnEachWithEventLoop && ctx.channel().isWritable()) {
+					scheduleFlush();
+				} else {
+					ctx.flush();
+				}
 			}
 			else {
-				ctx.flush();
+				Http2ServerHandler http2ServerHandler = ctx.channel().pipeline().get(Http2ServerHandler.class);
+				if (msg instanceof Http2Headers) {
+					future = http2ServerHandler.encoder()
+							                   .writeHeaders(ctx, streamId, (Http2Headers) msg,
+							                                 0, endOfStream, promise);
+				}
+				else {
+					future = http2ServerHandler.encoder()
+							                   .writeData(ctx, streamId, (ByteBuf) msg,
+							                              0, endOfStream, promise);
+				}
+				// TODO support flushOnEachWithEventLoop
+				http2ServerHandler.flush(ctx);
 			}
 			return future;
 		}
@@ -295,10 +306,27 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			if (log.isTraceEnabled()) {
 				log.trace("{} Pending write size = {}", ctx.channel(), pendingBytes);
 			}
-			ChannelFuture future = ctx.write(msg, promise);
-			if (!ctx.channel().isWritable()) {
-				pendingBytes = 0L;
-				ctx.flush();
+			ChannelFuture future;
+			if (streamId == -1) {
+				future = ctx.write(msg, promise);
+				if (!ctx.channel().isWritable()) {
+					pendingBytes = 0L;
+					ctx.flush();
+				}
+			}
+			else {
+				Http2ServerHandler http2ServerHandler = ctx.channel().pipeline().get(Http2ServerHandler.class);
+				if (msg instanceof Http2Headers) {
+					future = http2ServerHandler.encoder()
+					                           .writeHeaders(ctx, streamId, (Http2Headers) msg,
+					                                         0, endOfStream, promise);
+				}
+				else {
+					future = http2ServerHandler.encoder()
+					                           .writeData(ctx, streamId, (ByteBuf) msg,
+					                                      0, endOfStream, promise);
+				}
+				// TODO flush on channel not writable
 			}
 			return future;
 		}
@@ -359,7 +387,11 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 					return;
 				}
 
-				if (pendingWrites == null || innerActive || !ctx.channel()
+				// TODO
+				PublisherSender httpInner = innerPublishers.get(-1);
+				boolean httpInnerActive = httpInner != null ? httpInner.innerActive : false;
+
+				if (pendingWrites == null || httpInnerActive || !ctx.channel()
 				                                                .isWritable()) {
 					if (!ctx.channel().isWritable() && hasPendingWriteBytes()) {
 						ctx.flush();
@@ -392,7 +424,8 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 
 				v = pendingWrites.poll();
 
-				if (!innerActive && v == PublisherSender.PENDING_WRITES) {
+				// TODO
+				if (!httpInnerActive && v == PublisherSender.PENDING_WRITES) {
 					boolean last = pendingWrites.isEmpty();
 					if (!future.isDone() && hasPendingWriteBytes()) {
 						ctx.flush();
@@ -406,9 +439,24 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 				}
 				else if (future instanceof ChannelPromise) {
 					ChannelPromise promise = (ChannelPromise) future;
+					int streamId = -1;
+					boolean endOfStream = false;
+					if (v instanceof Http2Message) {
+						Http2Message http2Message = (Http2Message) v;
+						streamId = http2Message.streamId;
+						endOfStream = http2Message.endOfStream;
+						v = http2Message.msg;
+					}
 					if (v instanceof Publisher) {
 						Publisher<?> p = (Publisher<?>) v;
-	
+
+						PublisherSender inner = innerPublishers.get(streamId);
+						if (inner == null) {
+							inner = new PublisherSender(this, streamId);
+							inner.request(prefetch);
+							innerPublishers.put(streamId, inner);
+						}
+
 						if (p instanceof Callable) {
 							@SuppressWarnings("unchecked") Callable<?> supplier =
 									(Callable<?>) p;
@@ -427,24 +475,24 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 								promise.setSuccess();
 								continue;
 							}
-	
+
 							if (inner.unbounded) {
-								doWrite(vr, promise, null);
+								doWrite(vr, promise, null, streamId, endOfStream);
 							}
 							else {
-								innerActive = true;
+								inner.innerActive = true;
 								inner.promise = promise;
 								inner.onSubscribe(Operators.scalarSubscription(inner, vr));
 							}
 						}
 						else {
-							innerActive = true;
+							inner.innerActive = true;
 							inner.promise = promise;
 							p.subscribe(inner);
 						}
 					}
 					else {
-						doWrite(v, promise, null);
+						doWrite(v, promise, null, streamId, endOfStream);
 					}
 				}
 			}
@@ -462,6 +510,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			implements CoreSubscriber<Object>, Subscription, ChannelFutureListener {
 
 		final ChannelOperationsHandler parent;
+		final int streamId;
 
 		volatile Subscription missedSubscription;
 		volatile long         missedRequested;
@@ -469,6 +518,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		volatile int          wip;
 
 		boolean        inactive;
+		boolean        innerActive;
 		/**
 		 * The current outstanding request amount.
 		 */
@@ -483,8 +533,9 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		ChannelFuture  lastWrite;
 		boolean        lastThreadInEventLoop;
 
-		PublisherSender(ChannelOperationsHandler parent) {
+		PublisherSender(ChannelOperationsHandler parent, int streamId) {
 			this.parent = parent;
+			this.streamId = streamId;
 		}
 
 		@Override
@@ -504,7 +555,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			}
 			long p = produced;
 			ChannelFuture f = lastWrite;
-			parent.innerActive = false;
+			innerActive = false;
 
 			if (p != 0L) {
 				produced = 0L;
@@ -514,12 +565,26 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 					              .isActive()) {
 						parent.pendingBytes = 0L;
 						if (lastThreadInEventLoop) {
-							parent.ctx.flush();
+							if (streamId == -1) {
+								parent.ctx.flush();
+							}
+							else {
+								Http2ServerHandler http2ServerHandler = parent.ctx.channel().pipeline().get(Http2ServerHandler.class);
+								http2ServerHandler.flush(parent.ctx);
+							}
 						}
 						else {
 							parent.ctx.channel()
 							          .eventLoop()
-							          .execute(() -> parent.ctx.flush());
+							          .execute(() -> {
+							              if (streamId == -1) {
+							                  parent.ctx.flush();
+							              }
+							              else {
+							                  Http2ServerHandler http2ServerHandler = parent.ctx.channel().pipeline().get(Http2ServerHandler.class);
+							                  http2ServerHandler.flush(parent.ctx);
+							              }
+							          });
 						}
 					}
 					else {
@@ -551,7 +616,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		public void onError(Throwable t) {
 			long p = produced;
 			ChannelFuture f = lastWrite;
-			parent.innerActive = false;
+			innerActive = false;
 
 			if (p != 0L) {
 				produced = 0L;
@@ -559,12 +624,26 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 				if (parent.ctx.channel()
 				              .isActive()) {
 					if (lastThreadInEventLoop) {
-						parent.ctx.flush();
+						if (streamId == -1) {
+							parent.ctx.flush();
+						}
+						else {
+							Http2ServerHandler http2ServerHandler = parent.ctx.channel().pipeline().get(Http2ServerHandler.class);
+							http2ServerHandler.flush(parent.ctx);
+						}
 					}
 					else {
 						parent.ctx.channel()
 						          .eventLoop()
-						          .execute(() -> parent.ctx.flush());
+						          .execute(() -> {
+						                if (streamId == -1) {
+						                      parent.ctx.flush();
+						                }
+						                else {
+						                      Http2ServerHandler http2ServerHandler = parent.ctx.channel().pipeline().get(Http2ServerHandler.class);
+						                      http2ServerHandler.flush(parent.ctx);
+						                }
+						            });
 					}
 				}
 				else {
@@ -617,16 +696,20 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		private void onNextInternal(Object t, ChannelPromise promise) {
 			produced++;
 
-			parent.doWrite(t, promise, this);
+			parent.doWrite(t, promise, this, streamId, false);
 
 			if (parent.ctx.channel()
 			              .isWritable()) {
-				if (parent.innerActive) {
+				if (innerActive) {
 					request(1L);
 				}
 			}
 			else {
-				promise.addListener(parent);
+				promise.addListener(future -> {
+					if (future.isSuccess() && innerActive) {
+						request(1L);
+					}
+				});
 			}
 		}
 

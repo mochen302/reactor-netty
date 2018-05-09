@@ -29,7 +29,6 @@ import java.util.concurrent.TimeUnit;
 
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.HttpMethod;
-import org.junit.Ignore;
 import org.junit.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -37,7 +36,6 @@ import reactor.core.scheduler.Schedulers;
 import reactor.ipc.netty.ByteBufFlux;
 import reactor.ipc.netty.DisposableServer;
 import reactor.ipc.netty.FutureMono;
-import reactor.ipc.netty.Connection;
 import reactor.ipc.netty.SocketUtils;
 import reactor.ipc.netty.http.client.HttpClient;
 import reactor.ipc.netty.http.server.HttpServer;
@@ -109,13 +107,18 @@ public class ChannelOperationsHandlerTest {
 		channel.config().setWriteBufferLowWaterMark(writeBufferLowWaterMark)
 		                .setWriteBufferHighWaterMark(writeBufferHighWaterMark);
 
-		assertThat(handler.prefetch == (handler.inner.requested - handler.inner.produced)).isTrue();
+		ChannelOperationsHandler.PublisherSender inner = handler.innerPublishers.get(-1);
+		if (inner != null) {
+			assertThat(handler.prefetch == (inner.requested - inner.produced)).isTrue();
+		}
 
 		StepVerifier.create(FutureMono.deferFuture(() -> channel.writeAndFlush(Flux.range(0, 70))))
 		            .expectComplete()
 		            .verify(Duration.ofSeconds(30));
 
-		assertThat(handler.prefetch == (handler.inner.requested - handler.inner.produced)).isTrue();
+		if (inner != null) {
+			assertThat(handler.prefetch == (inner.requested - inner.produced)).isTrue();
+		}
 	}
 
 	@Test
