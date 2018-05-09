@@ -49,7 +49,7 @@ final class CleartextHttp2ServerUpgradeHandler extends ChannelHandlerAdapter {
 	public CleartextHttp2ServerUpgradeHandler(ConnectionEvents listener) {
 		this.listener = listener;
 		httpServerCodec = new HttpServerCodec();
-		http2ServerHandler = new Http2ServerHandlerBuilder(listener).build();
+		http2ServerHandler = new Http2ServerHandlerBuilder().build();
 		httpServerUpgradeHandler =
 				new HttpServerUpgradeHandler(httpServerCodec, new UpgradeCodecFactoryImpl());
 	}

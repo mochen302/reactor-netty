@@ -16,10 +16,6 @@
 package reactor.ipc.netty.http2.server;
 
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.handler.codec.http.FullHttpRequest;
-import io.netty.handler.codec.http.HttpHeaderNames;
-import io.netty.handler.codec.http.HttpMethod;
-import io.netty.handler.codec.http.HttpScheme;
 import io.netty.handler.codec.http.HttpServerUpgradeHandler.UpgradeEvent;
 import io.netty.handler.codec.http2.DefaultHttp2Headers;
 import io.netty.handler.codec.http2.Http2ConnectionDecoder;
@@ -41,30 +37,22 @@ public final class Http2ServerHandler extends Http2ConnectionHandler {
 	Http2ServerHandler(Http2ConnectionDecoder decoder, Http2ConnectionEncoder encoder, Http2Settings initialSettings) {
 		super(decoder, encoder, initialSettings);
 	}
+
 	@Override
 	public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
 		if (evt instanceof UpgradeEvent) {
-			UpgradeEvent upgradeEvent = (UpgradeEvent) evt;
 			Http2ServerOperations http2ServerOperations = (Http2ServerOperations) ChannelOperations.get(ctx.channel());
-			decoder().frameListener(http2ServerOperations);
+			if (http2ServerOperations != null) {
+				decoder().frameListener(http2ServerOperations.http2FrameListener());
+			}
+			else {
+				throw new IllegalStateException();
+			}
 			Http2Headers headers = new DefaultHttp2Headers().status(OK.codeAsText());
 			encoder().writeHeaders(ctx, 1, headers, 0, false, ctx.newPromise());
 			encoder().writeData(ctx, 1, EMPTY_BUFFER, 0, true, ctx.newPromise());
 		}
 		super.userEventTriggered(ctx, evt);
 		ctx.read();
-	}
-
-	private Http2Headers http1ToHttp2Headers(FullHttpRequest request) {
-		CharSequence host = request.headers()
-		                           .get(HttpHeaderNames.HOST);
-		Http2Headers http2Headers =
-				new DefaultHttp2Headers().method(HttpMethod.GET.asciiName())
-				                         .path(request.uri())
-				                         .scheme(HttpScheme.HTTP.name());
-		if (host != null) {
-			http2Headers.authority(host);
-		}
-		return http2Headers;
 	}
 }

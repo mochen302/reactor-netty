@@ -26,12 +26,14 @@ import reactor.ipc.netty.Connection;
 import reactor.ipc.netty.ConnectionEvents;
 
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 
 /**
  * @author Violeta Georgieva
  * @since 0.8
  */
-final class Http2ServerOperations extends Http2StreamOperations {
+public final class Http2ServerOperations extends Http2StreamOperations
+		implements BiConsumer<Void, Throwable> {
 
 	@SuppressWarnings("unchecked")
 	static Http2ServerOperations bindHttp2(Connection connection, ConnectionEvents listener) {
@@ -42,7 +44,7 @@ final class Http2ServerOperations extends Http2StreamOperations {
 	final ConcurrentHashMap<Integer, Http2StreamOperations> streamsCache = new ConcurrentHashMap<>();
 	final Http2FrameListener http2FrameListener;
 
-	Http2ServerOperations(Connection c, ConnectionEvents listener) {
+	public Http2ServerOperations(Connection c, ConnectionEvents listener) {
 		super(c, listener, null, -1);
 		streamsCache.put(-1, this);
 		http2FrameListener = new Http2FrameAdapter() {
@@ -79,5 +81,17 @@ final class Http2ServerOperations extends Http2StreamOperations {
 
 	Http2FrameListener http2FrameListener() {
 		return http2FrameListener;
+	}
+
+	@Override
+	public void accept(Void aVoid, Throwable throwable) {
+		if (throwable == null) {
+			if (channel().isActive()) {
+				onOutboundComplete();
+			}
+		}
+		else {
+			onOutboundError(throwable);
+		}
 	}
 }

@@ -24,7 +24,6 @@ import io.netty.handler.codec.http2.Http2FrameAdapter;
 import io.netty.handler.codec.http2.Http2FrameListener;
 import io.netty.handler.codec.http2.Http2FrameLogger;
 import io.netty.handler.codec.http2.Http2Settings;
-import reactor.ipc.netty.ConnectionEvents;
 import reactor.ipc.netty.channel.ChannelOperations;
 
 import static io.netty.handler.logging.LogLevel.INFO;
@@ -37,11 +36,8 @@ final class Http2ServerHandlerBuilder extends AbstractHttp2ConnectionHandlerBuil
 
 	static final Http2FrameLogger LOGGER = new Http2FrameLogger(INFO, Http2ServerHandler.class);
 
-	final ConnectionEvents listener;
-
-	Http2ServerHandlerBuilder(ConnectionEvents listener) {
+	Http2ServerHandlerBuilder() {
 		frameLogger(LOGGER);
-		this.listener = listener;
 	}
 
 	@Override
@@ -53,32 +49,22 @@ final class Http2ServerHandlerBuilder extends AbstractHttp2ConnectionHandlerBuil
 	protected Http2ServerHandler build(Http2ConnectionDecoder decoder,
 			Http2ConnectionEncoder encoder, Http2Settings initialSettings){
 		Http2ServerHandler handler = new Http2ServerHandler(decoder, encoder, initialSettings);
-		frameListener(new InitialHttp2FrameListener(handler, listener));
+		frameListener(new Http2FrameAdapter() {
+
+			@Override
+			public void onSettingsRead(ChannelHandlerContext ctx, Http2Settings settings) throws Http2Exception {
+				Http2ServerOperations http2ServerOperations = (Http2ServerOperations) ChannelOperations.get(ctx.channel());
+				if (http2ServerOperations != null) {
+					Http2FrameListener http2FrameListener = http2ServerOperations.http2FrameListener();
+					handler.decoder()
+							.frameListener(http2FrameListener);
+					http2FrameListener.onSettingsRead(ctx, settings);
+				}
+				else {
+					throw new IllegalStateException();
+				}
+			}
+		});
 		return handler;
-	}
-
-
-	static final class InitialHttp2FrameListener extends Http2FrameAdapter {
-		final Http2ServerHandler handler;
-		final ConnectionEvents listener;
-
-		InitialHttp2FrameListener(Http2ServerHandler handler, ConnectionEvents listener) {
-			this.handler = handler;
-			this.listener = listener;
-		}
-
-		@Override
-		public void onSettingsRead(ChannelHandlerContext ctx, Http2Settings settings) throws Http2Exception {
-			Http2ServerOperations http2ServerOperations = (Http2ServerOperations) ChannelOperations.get(ctx.channel());
-			if (http2ServerOperations != null) {
-				Http2FrameListener listener = http2ServerOperations.http2FrameListener();
-				handler.decoder()
-				       .frameListener(listener);
-				listener.onSettingsRead(ctx, settings);
-			}
-			else {
-				throw new IllegalStateException();
-			}
-		}
 	}
 }

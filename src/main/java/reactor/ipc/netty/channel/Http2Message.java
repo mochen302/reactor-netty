@@ -22,11 +22,23 @@ package reactor.ipc.netty.channel;
 public class Http2Message {
 	final int streamId;
 	final Object msg;
-	final boolean endOfStream;
+	final boolean isEndOfStream;
 
-	public Http2Message(int streamId, Object msg, boolean endOfStream) {
+	public Http2Message(int streamId, Object msg, boolean isEndOfStream) {
 		this.streamId = streamId;
 		this.msg = msg;
-		this.endOfStream = endOfStream;
+		this.isEndOfStream = isEndOfStream;
+	}
+
+	public int streamId() {
+		return streamId;
+	}
+
+	public Object message() {
+		return msg;
+	}
+
+	public boolean isEndOfStream() {
+		return isEndOfStream;
 	}
 }

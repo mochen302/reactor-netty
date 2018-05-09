@@ -18,19 +18,27 @@ package reactor.ipc.netty.http.server;
 
 import java.util.Queue;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpStatusClass;
 import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.handler.codec.http2.DefaultHttp2DataFrame;
+import io.netty.handler.codec.http2.DefaultHttp2Headers;
+import io.netty.handler.codec.http2.DefaultHttp2HeadersFrame;
+import io.netty.handler.codec.http2.Http2HeadersFrame;
 import io.netty.util.ReferenceCountUtil;
 import reactor.core.Exceptions;
 import reactor.ipc.netty.ConnectionEvents;
+import reactor.ipc.netty.channel.Http2Message;
 import reactor.util.concurrent.Queues;
 
 import static io.netty.handler.codec.http.HttpUtil.*;
@@ -74,17 +82,22 @@ final class HttpServerHandler extends ChannelDuplexHandler
 	@Override
 	public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
 		// read message and track if it was keepAlive
-		if (msg instanceof HttpRequest) {
-			final HttpRequest request = (HttpRequest) msg;
+		if (msg instanceof HttpRequest || msg instanceof Http2HeadersFrame) {
 			if (persistentConnection) {
 				pendingResponses += 1;
 				if (HttpServerOperations.log.isDebugEnabled()) {
 					HttpServerOperations.log.debug("Increasing pending responses, now " +
 							"{}", pendingResponses);
 				}
-				persistentConnection = isKeepAlive(request);
-			}
-			else {
+				if (msg instanceof HttpRequest) {
+					persistentConnection = isKeepAlive(((HttpRequest) msg).headers().get(HttpHeaderNames.CONNECTION),
+					                                   ((HttpRequest) msg).protocolVersion().isKeepAliveDefault());
+				}
+				else {
+					persistentConnection = isKeepAlive(((Http2HeadersFrame) msg).headers().get(HttpHeaderNames.CONNECTION),
+					                                   true);
+				}
+			} else {
 				if (HttpServerOperations.log.isDebugEnabled()) {
 					HttpServerOperations.log.debug("dropping pipelined HTTP request, " +
 									"previous response requested connection close");
@@ -153,11 +166,22 @@ final class HttpServerHandler extends ChannelDuplexHandler
 	public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise)
 			throws Exception {
 		// modify message on way out to add headers if needed
+		if (msg instanceof Http2Message) {
+			boolean endOfStream = ((Http2Message) msg).isEndOfStream();
+			Object obj = ((Http2Message) msg).message();
+			if (obj instanceof DefaultHttp2Headers) {
+				msg = new DefaultHttp2HeadersFrame((DefaultHttp2Headers) obj, endOfStream);
+			} else if (obj instanceof ByteBuf) {
+				msg = new DefaultHttp2DataFrame((ByteBuf) obj, endOfStream);
+			}
+		}
 		if (msg instanceof HttpResponse) {
 			final HttpResponse response = (HttpResponse) msg;
 			trackResponse(response);
 			// Assume the response writer knows if they can persist or not and sets isKeepAlive on the response
-			if (!isKeepAlive(response) || !isSelfDefinedMessageLength(response)) {
+			boolean isKeepAlive = isKeepAlive(((HttpResponse) msg).headers().get(HttpHeaderNames.CONNECTION),
+					((HttpResponse) msg).protocolVersion().isKeepAliveDefault());
+			if (!isKeepAlive || !isSelfDefinedMessageLength(response)) {
 				// No longer keep alive as the client can't tell when the message is done unless we close connection
 				pendingResponses = 0;
 				persistentConnection = false;
@@ -286,5 +310,17 @@ final class HttpServerHandler extends ChannelDuplexHandler
 				MULTIPART_PREFIX,
 				0,
 				MULTIPART_PREFIX.length());
+	}
+
+	static boolean isKeepAlive(CharSequence connection, boolean isKeepAliveDefault) {
+		if (connection != null && HttpHeaderValues.CLOSE.contentEqualsIgnoreCase(connection)) {
+			return false;
+		}
+
+		if (isKeepAliveDefault) {
+			return !HttpHeaderValues.CLOSE.contentEqualsIgnoreCase(connection);
+		} else {
+			return HttpHeaderValues.KEEP_ALIVE.contentEqualsIgnoreCase(connection);
+		}
 	}
 }

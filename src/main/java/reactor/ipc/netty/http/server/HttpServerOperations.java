@@ -51,6 +51,10 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.handler.codec.http.cookie.Cookie;
 import io.netty.handler.codec.http.cookie.ServerCookieEncoder;
+import io.netty.handler.codec.http2.Http2DataFrame;
+import io.netty.handler.codec.http2.Http2HeadersFrame;
+import io.netty.handler.codec.http2.Http2StreamChannel;
+import io.netty.handler.codec.http2.HttpConversionUtil;
 import io.netty.util.AsciiString;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
@@ -64,6 +68,9 @@ import reactor.ipc.netty.http.Cookies;
 import reactor.ipc.netty.http.HttpOperations;
 import reactor.ipc.netty.http.websocket.WebsocketInbound;
 import reactor.ipc.netty.http.websocket.WebsocketOutbound;
+import reactor.ipc.netty.http2.server.Http2ServerOperations;
+import reactor.ipc.netty.http2.server.Http2StreamInbound;
+import reactor.ipc.netty.http2.server.Http2StreamOutbound;
 import reactor.util.Logger;
 import reactor.util.Loggers;
 
@@ -80,7 +87,25 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 	@SuppressWarnings("unchecked")
 	static HttpServerOperations bindHttp(Connection connection, ConnectionEvents listener,
 			Object msg, boolean forwarded) {
-		return new HttpServerOperations(connection, listener, (HttpRequest) msg, forwarded);
+		HttpRequest req;
+		if (msg instanceof Http2HeadersFrame) {
+			try {
+				Http2HeadersFrame reqHeaders = (Http2HeadersFrame) msg;
+				if (reqHeaders.isEndStream()) {
+					req = HttpConversionUtil.toFullHttpRequest(-1, reqHeaders.headers(),
+							connection.channel().alloc(), false);
+				} else {
+					req = HttpConversionUtil.toHttpRequest(-1, reqHeaders.headers(), false);
+				}
+			}
+			catch(Exception e) {
+				throw new RuntimeException(e);
+			}
+		}
+		else {
+			req = (HttpRequest) msg;
+		}
+		return new HttpServerOperations(connection, listener, req, forwarded);
 	}
 
 	final HttpResponse nettyResponse;
@@ -111,10 +136,24 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 		this.responseHeaders = nettyResponse.headers();
 		this.cookieHolder = Cookies.newServerRequestHolder(requestHeaders());
 		if (forwarded) {
-			this.connectionInfo = ConnectionInfo.newForwardedConnectionInfo(this, (SocketChannel) channel());
+			Channel socketChannel;
+			if (channel() instanceof Http2StreamChannel) {
+				socketChannel = ((Http2StreamChannel) channel()).parent();
+			}
+			else {
+				socketChannel = channel();
+			}
+			this.connectionInfo = ConnectionInfo.newForwardedConnectionInfo(this, (SocketChannel) socketChannel);
 		}
 		else {
-			this.connectionInfo = ConnectionInfo.newConnectionInfo(this, (SocketChannel) channel());
+			Channel socketChannel;
+			if (channel() instanceof Http2StreamChannel) {
+				socketChannel = ((Http2StreamChannel) channel()).parent();
+			}
+			else {
+				socketChannel = channel();
+			}
+			this.connectionInfo = ConnectionInfo.newConnectionInfo(this, (SocketChannel) socketChannel);
 		}
 		chunkedTransfer(true);
 	}
@@ -366,6 +405,12 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 	}
 
 	@Override
+	public Mono<Void> asHttp2(
+			BiFunction<? super Http2StreamInbound, ? super Http2StreamOutbound, ? extends Publisher<Void>> handler) {
+		return withHttp2Support(handler);
+	}
+
+	@Override
 	public String uri() {
 		if (nettyRequest != null) {
 			return nettyRequest.uri();
@@ -388,6 +433,26 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 				super.onInboundNext(ctx, msg);
 			}
 			if (msg instanceof LastHttpContent) {
+				onInboundComplete();
+				if (!isKeepAlive()) {
+					channel().config()
+					         .setAutoRead(true); //detect close
+				}
+			}
+		}
+		else if (msg instanceof Http2HeadersFrame) {
+			if (((Http2HeadersFrame) msg).isEndStream()) {
+				onInboundComplete();
+				if (!isKeepAlive()) {
+					channel().config()
+							.setAutoRead(true); //detect close
+				}
+			}
+		}
+		else if (msg instanceof Http2DataFrame) {
+			Http2DataFrame data = (Http2DataFrame) msg;
+			super.onInboundNext(ctx, data.content());
+			if (data.isEndStream()) {
 				onInboundComplete();
 				if (!isKeepAlive()) {
 					channel().config()
@@ -499,6 +564,23 @@ class HttpServerOperations extends HttpOperations<HttpServerRequest, HttpServerR
 			log.error("Cannot enable websocket if headers have already been sent");
 		}
 		return Mono.error(new IllegalStateException("Failed to upgrade to websocket"));
+	}
+
+	final Mono<Void> withHttp2Support(
+			BiFunction<? super Http2StreamInbound, ? super Http2StreamOutbound, ? extends Publisher<Void>> handler) {
+		Objects.requireNonNull(handler, "handler");
+		if (markSentHeaders()) {
+			Http2ServerOperations ops = new Http2ServerOperations(this, listener());
+
+			if (replace(ops)) {
+				return Mono.defer(() -> Mono.from(handler.apply(ops, ops)))
+				           .doAfterSuccessOrError(ops);
+			}
+		}
+		else {
+			log.error("Cannot enable HTTP/2 if headers have already been sent");
+		}
+		return Mono.error(new IllegalStateException("Failed to upgrade to HTTP/2"));
 	}
 
 	static final Logger log = Loggers.getLogger(HttpServerOperations.class);

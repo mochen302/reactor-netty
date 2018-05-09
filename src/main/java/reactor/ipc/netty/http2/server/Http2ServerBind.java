@@ -121,7 +121,7 @@ final class Http2ServerBind extends Http2Server implements Function<ServerBootst
 				ctx.pipeline()
 				   .addBefore(NettyPipeline.ReactiveBridge,
 				              NettyPipeline.Http2ServerHandler,
-				              new Http2ServerHandlerBuilder(listener).build());
+				              new Http2ServerHandlerBuilder().build());
 				return;
 			}
 

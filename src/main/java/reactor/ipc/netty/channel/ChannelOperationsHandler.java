@@ -37,6 +37,7 @@ import io.netty.channel.Channel.Unsafe;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
@@ -45,6 +46,9 @@ import io.netty.channel.FileRegion;
 import io.netty.handler.codec.DecoderResult;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http2.Http2Headers;
+import io.netty.handler.ssl.ApplicationProtocolNames;
+import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.util.ReferenceCountUtil;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscription;
@@ -66,7 +70,7 @@ import reactor.util.concurrent.Queues;
  * @author Stephane Maldini
  * @author Violeta Georgieva
  */
-final class ChannelOperationsHandler extends ChannelDuplexHandler
+final public class ChannelOperationsHandler extends ChannelDuplexHandler
 		implements NettyPipeline.SendOptions {
 
 	final ConcurrentHashMap<Integer, PublisherSender> innerPublishers = new ConcurrentHashMap<>();
@@ -91,8 +95,10 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 	volatile int     wip;
 	volatile long    scheduledFlush;
 
+	String protocol = ApplicationProtocolNames.HTTP_1_1;
+
 	@SuppressWarnings("unchecked")
-	ChannelOperationsHandler(ConnectionEvents listener) {
+	public ChannelOperationsHandler(ConnectionEvents listener) {
 		this.prefetch = 32;
 		this.listener = listener;
 	}
@@ -123,27 +129,32 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			return;
 		}
 		try {
-			ChannelOperations<?, ?> ops = ChannelOperations.get(ctx.channel());
-			if (ops != null) {
-				ops.onInboundNext(ctx, msg);
+			if (ApplicationProtocolNames.HTTP_2.equals(protocol)) {
+				// Must be the prefetch message
+				ctx.fireChannelRead(ReferenceCountUtil.retain(msg));
 			}
 			else {
-				if (log.isDebugEnabled()) {
-					String loggingMsg = msg.toString();
-					if (msg instanceof HttpResponse) {
-						DecoderResult decoderResult = ((HttpResponse) msg).decoderResult();
-						if (decoderResult.isFailure()) {
-							log.debug("Decoding failed: " + msg + " : ", decoderResult.cause());
+				ChannelOperations<?, ?> ops = ChannelOperations.get(ctx.channel());
+				if (ops != null) {
+					ops.onInboundNext(ctx, msg);
+				} else {
+					if (log.isDebugEnabled()) {
+						String loggingMsg = msg.toString();
+						if (msg instanceof HttpResponse) {
+							DecoderResult decoderResult = ((HttpResponse) msg).decoderResult();
+							if (decoderResult.isFailure()) {
+								log.debug("Decoding failed: " + msg + " : ", decoderResult.cause());
+							}
 						}
+						if (msg instanceof ByteBufHolder) {
+							loggingMsg = ((ByteBufHolder) msg).content()
+									.toString(Charset.defaultCharset());
+						}
+						log.debug("{} No ChannelOperation attached. Dropping: {}", ctx
+								.channel().toString(), loggingMsg);
 					}
-					if (msg instanceof ByteBufHolder) {
-						loggingMsg = ((ByteBufHolder) msg).content()
-						                                  .toString(Charset.defaultCharset());
-					}
-					log.debug("{} No ChannelOperation attached. Dropping: {}", ctx
-							.channel().toString(), loggingMsg);
+					ReferenceCountUtil.release(msg);
 				}
-				ReferenceCountUtil.release(msg);
 			}
 		}
 		catch (Throwable err) {
@@ -220,6 +231,12 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			                                            .accept(this);
 			return;
 		}
+		if (evt instanceof SslHandshakeCompletionEvent) {
+			if (((SslHandshakeCompletionEvent) evt).isSuccess()) {
+				SslHandler sslHandler = ctx.pipeline().get(SslHandler.class);
+				protocol = sslHandler.applicationProtocol();
+			}
+		}
 
 		ctx.fireUserEventTriggered(evt);
 	}
@@ -256,7 +273,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		return this;
 	}
 
-	ChannelFuture doWrite(Object msg, ChannelPromise promise, @Nullable PublisherSender inner, int streamId, boolean endOfStream) {
+	ChannelFuture doWrite(Object msg, ChannelPromise promise, @Nullable PublisherSender inner, int streamId, boolean endOfStream, boolean isHttp2Msg) {
 		if (flushOnEach || //fastpath
 				inner == null && pendingWrites.isEmpty() || //last drained element
 				!ctx.channel()
@@ -266,7 +283,12 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 
 			ChannelFuture future;
 			if (streamId == -1) {
-				future = ctx.write(msg, promise);
+				if (!isHttp2Msg) {
+					future = ctx.write(msg, promise);
+				}
+				else {
+					future = ctx.write(new Http2Message(streamId, msg, endOfStream), promise);
+				}
 				if (flushOnEachWithEventLoop && ctx.channel().isWritable()) {
 					scheduleFlush();
 				} else {
@@ -308,7 +330,12 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 			}
 			ChannelFuture future;
 			if (streamId == -1) {
-				future = ctx.write(msg, promise);
+				if (!isHttp2Msg) {
+					future = ctx.write(msg, promise);
+				}
+				else {
+					future = ctx.write(new Http2Message(streamId, msg, endOfStream), promise);
+				}
 				if (!ctx.channel().isWritable()) {
 					pendingBytes = 0L;
 					ctx.flush();
@@ -441,18 +468,20 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 					ChannelPromise promise = (ChannelPromise) future;
 					int streamId = -1;
 					boolean endOfStream = false;
+					boolean isHttp2Msg = false;
 					if (v instanceof Http2Message) {
 						Http2Message http2Message = (Http2Message) v;
-						streamId = http2Message.streamId;
-						endOfStream = http2Message.endOfStream;
-						v = http2Message.msg;
+						streamId = http2Message.streamId();
+						endOfStream = http2Message.isEndOfStream();
+						v = http2Message.message();
+						isHttp2Msg = true;
 					}
 					if (v instanceof Publisher) {
 						Publisher<?> p = (Publisher<?>) v;
 
 						PublisherSender inner = innerPublishers.get(streamId);
 						if (inner == null) {
-							inner = new PublisherSender(this, streamId);
+							inner = new PublisherSender(this, streamId, isHttp2Msg);
 							inner.request(prefetch);
 							innerPublishers.put(streamId, inner);
 						}
@@ -477,7 +506,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 							}
 
 							if (inner.unbounded) {
-								doWrite(vr, promise, null, streamId, endOfStream);
+								doWrite(vr, promise, null, streamId, endOfStream, isHttp2Msg);
 							}
 							else {
 								inner.innerActive = true;
@@ -492,7 +521,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 						}
 					}
 					else {
-						doWrite(v, promise, null, streamId, endOfStream);
+						doWrite(v, promise, null, streamId, endOfStream, isHttp2Msg);
 					}
 				}
 			}
@@ -511,6 +540,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 
 		final ChannelOperationsHandler parent;
 		final int streamId;
+		final boolean isHttp2Msg;
 
 		volatile Subscription missedSubscription;
 		volatile long         missedRequested;
@@ -533,9 +563,10 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		ChannelFuture  lastWrite;
 		boolean        lastThreadInEventLoop;
 
-		PublisherSender(ChannelOperationsHandler parent, int streamId) {
+		PublisherSender(ChannelOperationsHandler parent, int streamId, boolean isHttp2Msg) {
 			this.parent = parent;
 			this.streamId = streamId;
+			this.isHttp2Msg = isHttp2Msg;
 		}
 
 		@Override
@@ -696,7 +727,7 @@ final class ChannelOperationsHandler extends ChannelDuplexHandler
 		private void onNextInternal(Object t, ChannelPromise promise) {
 			produced++;
 
-			parent.doWrite(t, promise, this, streamId, false);
+			parent.doWrite(t, promise, this, streamId, false, isHttp2Msg);
 
 			if (parent.ctx.channel()
 			              .isWritable()) {

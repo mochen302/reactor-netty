@@ -30,6 +30,7 @@ import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import org.junit.Test;
 import reactor.core.publisher.Flux;
 import reactor.ipc.netty.DisposableServer;
+import reactor.ipc.netty.http.server.HttpServer;
 
 import java.time.Duration;
 
@@ -69,10 +70,9 @@ public class Http2ServerTests extends Http2ServerBaseTests {
 	}
 
 	@Test
-	public void testHttp2ClearText() throws Exception {
+	public void testHttp2ClearText() {
 		DisposableServer server =
 				Http2Server.create()
-				           .tcpConfiguration(tcpServer -> tcpServer.host("127.0.0.1"))
 				           .port(0)
 				           .wiretap()
 				           .handler((in, out) -> out.sendString(Flux.just("Hello", " from", " HTTP/2", " Server")))
@@ -80,6 +80,53 @@ public class Http2ServerTests extends Http2ServerBaseTests {
 
 
 		get(server.address(), new Http2ClientHandler(null, "Hello from HTTP/2 Server"), "/", 3);
+
+		server.disposeNow();
+	}
+
+
+	@Test
+	public void testHttpToHttp2() throws Exception {
+		DisposableServer server =
+				HttpServer.create()
+				          .port(0)
+				          .secure()
+				          .wiretap()
+				          .handler((req, res) -> res.asHttp2(
+				                  (in, out) -> out.sendString(Flux.just("Hello", " from", " HTTP/1.1 to HTTP/2", " Server"))))
+				          .bindNow(Duration.ofSeconds(300));
+
+		SslProvider provider = OpenSsl.isAlpnSupported() ? SslProvider.OPENSSL : SslProvider.JDK;
+		SslContext sslContext =
+				SslContextBuilder.forClient()
+				                 .sslProvider(provider)
+				                 .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
+				                 .trustManager(InsecureTrustManagerFactory.INSTANCE)
+				                 .applicationProtocolConfig(new ApplicationProtocolConfig(
+				                     Protocol.ALPN,
+				                     SelectorFailureBehavior.NO_ADVERTISE,
+				                     SelectedListenerFailureBehavior.ACCEPT,
+				                     ApplicationProtocolNames.HTTP_2,
+				                     ApplicationProtocolNames.HTTP_1_1))
+				                 .build();
+
+		get(server.address(), new Http2ClientHandler(sslContext, "Hello from HTTP/1.1 to HTTP/2 Server"), "/", 3);
+
+		server.disposeNow();
+	}
+
+	@Test
+	public void testHttpToHttp2ClearText() {
+		DisposableServer server =
+				HttpServer.create()
+				          .port(0)
+				          .wiretap()
+				          .handler((req, res) -> res.asHttp2(
+				                  (in, out) -> out.sendString(Flux.just("Hello", " from", " HTTP/1.1 to HTTP/2", " Server"))))
+				          .bindNow(Duration.ofSeconds(30));
+
+
+		get(server.address(), new Http2ClientHandler(null, "Hello from HTTP/1.1 to HTTP/2 Server"), "/", 3);
 
 		server.disposeNow();
 	}

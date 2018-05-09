@@ -24,7 +24,18 @@ import java.util.function.Function;
 import javax.annotation.Nullable;
 
 import io.netty.bootstrap.ServerBootstrap;
+import io.netty.handler.codec.http2.Http2SecurityUtil;
 import io.netty.handler.logging.LoggingHandler;
+import io.netty.handler.ssl.ApplicationProtocolConfig;
+import io.netty.handler.ssl.ApplicationProtocolConfig.Protocol;
+import io.netty.handler.ssl.ApplicationProtocolConfig.SelectorFailureBehavior;
+import io.netty.handler.ssl.ApplicationProtocolConfig.SelectedListenerFailureBehavior;
+import io.netty.handler.ssl.ApplicationProtocolNames;
+import io.netty.handler.ssl.OpenSsl;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SupportedCipherSuiteFilter;
+import io.netty.handler.ssl.util.SelfSignedCertificate;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Mono;
 import reactor.ipc.netty.Connection;
@@ -32,6 +43,7 @@ import reactor.ipc.netty.ConnectionEvents;
 import reactor.ipc.netty.DisposableServer;
 import reactor.ipc.netty.channel.BootstrapHandlers;
 import reactor.ipc.netty.channel.ChannelOperations;
+import reactor.ipc.netty.tcp.SslProvider;
 import reactor.ipc.netty.tcp.TcpServer;
 import reactor.util.Logger;
 import reactor.util.Loggers;
@@ -164,6 +176,17 @@ public abstract class HttpServer {
 	public final HttpServer wiretap() {
 		return tcpConfiguration(tcpServer ->
 		       tcpServer.bootstrap(b -> BootstrapHandlers.updateLogSupport(b, LOGGING_HANDLER)));
+	}
+
+	/**
+	 * Enable default sslContext support. The default {@link SslContext} will be assigned
+	 * to with a default value of {@literal 10} seconds handshake timeout unless the
+	 * environment property {@literal reactor.ipc.netty.sslHandshakeTimeout} is set.
+	 *
+	 * @return a new {@link HttpServer}
+	 */
+	public final HttpServer secure() {
+		return tcpConfiguration(tcp -> tcp.secure(SSL_DEFAULT_SPEC));
 	}
 
 	/**
@@ -361,4 +384,32 @@ public abstract class HttpServer {
 
 	static final Function<TcpServer, TcpServer> FORWARDED_ATTR_DISABLE =
 			tcp -> tcp.bootstrap(HTTP_OPS_CONF);
+
+	static final SslContext DEFAULT_SSL_CONTEXT;
+	static {
+		SslContext sslContext;
+		try {
+			SelfSignedCertificate cert = new SelfSignedCertificate();
+			io.netty.handler.ssl.SslProvider provider =
+					OpenSsl.isAlpnSupported() ? io.netty.handler.ssl.SslProvider.OPENSSL :
+					                            io.netty.handler.ssl.SslProvider.JDK;
+			sslContext =
+					SslContextBuilder.forServer(cert.certificate(), cert.privateKey())
+					                 .sslProvider(provider)
+					                 .ciphers(Http2SecurityUtil.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
+					                 .applicationProtocolConfig(new ApplicationProtocolConfig(
+					                     Protocol.ALPN,
+					                     SelectorFailureBehavior.NO_ADVERTISE,
+					                     SelectedListenerFailureBehavior.ACCEPT,
+					                     ApplicationProtocolNames.HTTP_2,
+					                     ApplicationProtocolNames.HTTP_1_1))
+					                 .build();
+		}
+		catch (Exception e) {
+			sslContext = null;
+		}
+		DEFAULT_SSL_CONTEXT = sslContext;
+	}
+	static final Consumer<SslProvider.SslContextSpec> SSL_DEFAULT_SPEC =
+			sslProviderBuilder -> sslProviderBuilder.sslContext(DEFAULT_SSL_CONTEXT);
 }

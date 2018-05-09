@@ -32,6 +32,8 @@ import reactor.ipc.netty.NettyPipeline;
 import reactor.ipc.netty.http.HttpInfos;
 import reactor.ipc.netty.http.websocket.WebsocketInbound;
 import reactor.ipc.netty.http.websocket.WebsocketOutbound;
+import reactor.ipc.netty.http2.server.Http2StreamInbound;
+import reactor.ipc.netty.http2.server.Http2StreamOutbound;
 
 /**
  *
@@ -179,6 +181,10 @@ public interface HttpServerResponse extends NettyOutbound, HttpInfos {
 	 */
 	Mono<Void> sendWebsocket(@Nullable String protocols,
 			BiFunction<? super WebsocketInbound, ? super WebsocketOutbound, ? extends Publisher<Void>> websocketHandler);
+
+
+	Mono<Void> asHttp2(
+			BiFunction<? super Http2StreamInbound, ? super Http2StreamOutbound, ? extends Publisher<Void>> handler);	/**
 
 
 	/**
